@@ -2,19 +2,22 @@ package flags
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/lc/gau/v2/pkg/providers"
 	"github.com/lynxsecurity/pflag"
 	"github.com/lynxsecurity/viper"
 	log "github.com/sirupsen/logrus"
 	"github.com/valyala/fasthttp"
 	"github.com/valyala/fasthttp/fasthttpproxy"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
 )
 
 type URLScanConfig struct {
@@ -26,9 +29,11 @@ type Config struct {
 	Filters           providers.Filters `mapstructure:"filters"`
 	Proxy             string            `mapstructure:"proxy"`
 	Threads           uint              `mapstructure:"threads"`
+	Timeout           uint              `mapstructure:"timeout"`
 	Verbose           bool              `mapstructure:"verbose"`
 	MaxRetries        uint              `mapstructure:"retries"`
 	IncludeSubdomains bool              `mapstructure:"subdomains"`
+	RemoveParameters  bool              `mapstructure:"parameters"`
 	Providers         []string          `mapstructure:"providers"`
 	Blacklist         []string          `mapstructure:"blacklist"`
 	JSON              bool              `mapstructure:"json"`
@@ -57,9 +62,10 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 
 	pc := &providers.Config{
 		Threads:           c.Threads,
-		Verbose:           c.Verbose,
+		Timeout:           c.Timeout,
 		MaxRetries:        c.MaxRetries,
 		IncludeSubdomains: c.IncludeSubdomains,
+		RemoveParameters:  c.RemoveParameters,
 		Client: &fasthttp.Client{
 			TLSConfig: &tls.Config{
 				InsecureSkipVerify: true,
@@ -76,11 +82,12 @@ func (c *Config) ProviderConfig() (*providers.Config, error) {
 		OTX: c.OTX,
 	}
 
-	pc.Blacklist = make(map[string]struct{})
-	for _, b := range c.Blacklist {
-		pc.Blacklist[b] = struct{}{}
+	log.SetLevel(log.ErrorLevel)
+	if c.Verbose {
+		log.SetLevel(log.InfoLevel)
 	}
-
+	pc.Blacklist = mapset.NewThreadUnsafeSet(c.Blacklist...)
+	pc.Blacklist.Add("")
 	return pc, nil
 }
 
@@ -92,12 +99,15 @@ func New() *Options {
 	v := viper.New()
 
 	pflag.String("o", "", "filename to write results to")
-	pflag.Uint("threads", 1, "number of workers to spawn, default: 1")
+	pflag.String("config", "", "location of config file (default $HOME/.gau.toml or %USERPROFILE%\\.gau.toml)")
+	pflag.Uint("threads", 1, "number of workers to spawn")
+	pflag.Uint("timeout", 45, "timeout (in seconds) for HTTP client")
 	pflag.Uint("retries", 0, "retries for HTTP client")
 	pflag.String("proxy", "", "http proxy to use")
 	pflag.StringSlice("blacklist", []string{}, "list of extensions to skip")
 	pflag.StringSlice("providers", []string{}, "list of providers to use (wayback,commoncrawl,otx,urlscan)")
 	pflag.Bool("subs", false, "include subdomains of target domain")
+	pflag.Bool("fp", false, "remove different parameters of the same endpoint")
 	pflag.Bool("verbose", false, "show verbose output")
 	pflag.Bool("json", false, "output as json")
 
@@ -125,16 +135,25 @@ func Args() []string {
 }
 
 func (o *Options) ReadInConfig() (*Config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return o.DefaultConfig(), err
+	confFile := o.viper.GetString("config")
+
+	if confFile == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return o.DefaultConfig(), err
+		}
+
+		confFile = filepath.Join(home, ".gau.toml")
 	}
 
-	confFile := filepath.Join(home, ".gau.toml")
 	return o.ReadConfigFile(confFile)
 }
 
 func (o *Options) ReadConfigFile(name string) (*Config, error) {
+	if _, err := os.Stat(name); errors.Is(err, os.ErrNotExist) {
+		return o.DefaultConfig(), fmt.Errorf("Config file %s not found, using default config", name)
+	}
+
 	o.viper.SetConfigFile(name)
 
 	if err := o.viper.ReadInConfig(); err != nil {
@@ -156,10 +175,12 @@ func (o *Options) DefaultConfig() *Config {
 	c := &Config{
 		Filters:           providers.Filters{},
 		Proxy:             "",
+		Timeout:           45,
 		Threads:           1,
 		Verbose:           false,
 		MaxRetries:        5,
 		IncludeSubdomains: false,
+		RemoveParameters:  false,
 		Providers:         []string{"wayback", "commoncrawl", "otx", "urlscan"},
 		Blacklist:         []string{},
 		JSON:              false,
@@ -182,6 +203,7 @@ func (o *Options) getFlagValues(c *Config) {
 	threads := o.viper.GetUint("threads")
 	blacklist := o.viper.GetStringSlice("blacklist")
 	subs := o.viper.GetBool("subs")
+	fp := o.viper.GetBool("fp")
 
 	if version {
 		fmt.Printf("gau version: %s\n", providers.Version)
@@ -218,13 +240,12 @@ func (o *Options) getFlagValues(c *Config) {
 		c.IncludeSubdomains = subs
 	}
 
-	if json {
-		c.JSON = true
+	if fp {
+		c.RemoveParameters = fp
 	}
 
-	if verbose {
-		c.Verbose = verbose
-	}
+	c.JSON = json
+	c.Verbose = verbose
 
 	// get filter flags
 	mc := o.viper.GetStringSlice("mc")

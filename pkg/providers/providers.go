@@ -2,10 +2,12 @@ package providers
 
 import (
 	"context"
+
+	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/valyala/fasthttp"
 )
 
-const Version = `2.0.6`
+const Version = `2.2.4`
 
 // Provider is a generic interface for all archive fetchers
 type Provider interface {
@@ -20,12 +22,13 @@ type URLScan struct {
 
 type Config struct {
 	Threads           uint
-	Verbose           bool
+	Timeout           uint
 	MaxRetries        uint
 	IncludeSubdomains bool
+	RemoveParameters  bool
 	Client            *fasthttp.Client
 	Providers         []string
-	Blacklist         map[string]struct{}
+	Blacklist         mapset.Set[string]
 	Output            string
 	JSON              bool
 	URLScan           URLScan

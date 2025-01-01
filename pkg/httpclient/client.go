@@ -2,60 +2,71 @@ package httpclient
 
 import (
 	"errors"
-	"github.com/valyala/fasthttp"
 	"math/rand"
 	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
-var ErrNilResponse = errors.New("unexpected nil response")
-var ErrNon200Response = errors.New("API responded with non-200 status code")
+var (
+	ErrNilResponse    = errors.New("unexpected nil response")
+	ErrNon200Response = errors.New("API responded with non-200 status code")
+	ErrBadRequest     = errors.New("API responded with 400 status code")
+)
 
 type Header struct {
 	Key   string
 	Value string
 }
 
-func MakeRequest(c *fasthttp.Client, url string, maxRetries int, headers ...Header) ([]byte, error) {
+func MakeRequest(c *fasthttp.Client, url string, maxRetries uint, timeout uint, headers ...Header) ([]byte, error) {
 	var (
-		req  *fasthttp.Request
-		resp *fasthttp.Response
+		req      *fasthttp.Request
+		respBody []byte
+		err      error
 	)
-	retries := maxRetries
+	retries := int(maxRetries)
 	for i := retries; i >= 0; i-- {
 		req = fasthttp.AcquireRequest()
-		defer fasthttp.ReleaseRequest(req)
 
 		req.Header.SetMethod(fasthttp.MethodGet)
 		for _, header := range headers {
-			req.Header.Set(header.Key, header.Value)
+			if header.Key != "" {
+				req.Header.Set(header.Key, header.Value)
+			}
 		}
 		req.Header.Set(fasthttp.HeaderUserAgent, getUserAgent())
+		req.Header.Set("Accept", "*/*")
 		req.SetRequestURI(url)
-
-		resp = fasthttp.AcquireResponse()
-		defer fasthttp.ReleaseResponse(resp)
-
-		if err := c.DoTimeout(req, resp, time.Second*45); err != nil {
-			fasthttp.ReleaseRequest(req)
-			if retries == 0 {
-				return nil, err
-			}
-		}
-
-		if resp.Body() == nil {
-			if retries == 0 {
-				return nil, ErrNilResponse
-			}
-		}
-		// url responded with 503, so try again
-		if resp.StatusCode() == 503 {
-			continue
+		respBody, err = doReq(c, req, timeout)
+		if err == nil {
+			break
 		}
 	}
+	if err != nil {
+		return nil, err
+	}
+	return respBody, nil
+}
 
+// doReq handles http requests
+func doReq(c *fasthttp.Client, req *fasthttp.Request, timeout uint) ([]byte, error) {
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+	defer fasthttp.ReleaseRequest(req)
+	if err := c.DoTimeout(req, resp, time.Second*time.Duration(timeout)); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode() != 200 {
+		if resp.StatusCode() == 400 {
+			return nil, ErrBadRequest
+		}
 		return nil, ErrNon200Response
 	}
+	if resp.Body() == nil {
+		return nil, ErrNilResponse
+	}
+
 	return resp.Body(), nil
 }
 
@@ -74,9 +85,7 @@ func getUserAgent() string {
 		"Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1; Trident/6.0)",
 	}
 
-	rand.Seed(time.Now().UnixNano())
 	randomIndex := rand.Intn(len(payload))
-
 	pick := payload[randomIndex]
 
 	return pick

@@ -1,38 +1,40 @@
 package output
 
 import (
-	jsoniter "github.com/json-iterator/go"
-	"github.com/valyala/bytebufferpool"
 	"io"
 	"net/url"
 	"path"
 	"strings"
+
+	mapset "github.com/deckarep/golang-set/v2"
+	jsoniter "github.com/json-iterator/go"
+	"github.com/valyala/bytebufferpool"
 )
 
 type JSONResult struct {
 	Url string `json:"url"`
 }
 
-func WriteURLs(writer io.Writer, results <-chan string, blacklistMap map[string]struct{}) error {
+func WriteURLs(writer io.Writer, results <-chan string, blacklistMap mapset.Set[string], RemoveParameters bool) error {
+	lastURL := mapset.NewThreadUnsafeSet[string]()
 	for result := range results {
 		buf := bytebufferpool.Get()
-		if len(blacklistMap) != 0 {
-			u, err := url.Parse(result)
-			if err != nil {
-				continue
-			}
-			base := strings.Split(path.Base(u.Path), ".")
-			ext := base[len(base)-1]
-			if ext != "" {
-				_, ok := blacklistMap[strings.ToLower(ext)]
-				if ok {
-					continue
-				}
-			}
+		u, err := url.Parse(result)
+		if err != nil {
+			continue
 		}
+		if path.Ext(u.Path) != "" && blacklistMap.Contains(strings.ToLower(path.Ext(u.Path))) {
+			continue
+		}
+
+		if RemoveParameters && !lastURL.Contains(u.Host+u.Path) {
+			continue
+		}
+		lastURL.Add(u.Host + u.Path)
+
 		buf.B = append(buf.B, []byte(result)...)
 		buf.B = append(buf.B, "\n"...)
-		_, err := writer.Write(buf.B)
+		_, err = writer.Write(buf.B)
 		if err != nil {
 			return err
 		}
@@ -41,23 +43,16 @@ func WriteURLs(writer io.Writer, results <-chan string, blacklistMap map[string]
 	return nil
 }
 
-func WriteURLsJSON(writer io.Writer, results <-chan string, blacklistMap map[string]struct{}) {
+func WriteURLsJSON(writer io.Writer, results <-chan string, blacklistMap mapset.Set[string], RemoveParameters bool) {
 	var jr JSONResult
 	enc := jsoniter.NewEncoder(writer)
 	for result := range results {
-		if len(blacklistMap) != 0 {
-			u, err := url.Parse(result)
-			if err != nil {
-				continue
-			}
-			base := strings.Split(path.Base(u.Path), ".")
-			ext := base[len(base)-1]
-			if ext != "" {
-				_, ok := blacklistMap[strings.ToLower(ext)]
-				if ok {
-					continue
-				}
-			}
+		u, err := url.Parse(result)
+		if err != nil {
+			continue
+		}
+		if blacklistMap.Contains(strings.ToLower(path.Ext(u.Path))) {
+			continue
 		}
 		jr.Url = result
 		if err := enc.Encode(jr); err != nil {
